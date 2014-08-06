@@ -1,26 +1,21 @@
 from copy import copy, deepcopy
 import re
+from ..external.six import string_types, iteritems
 
 class DictList(list):
-    """A combined dict and list that feels like a list, but has
-    the speed benefits of a dict.  This may be eventually
-    replaced by collections.OrderedDict.
-
-    This was written to address the performance issues associated
-    with searching, accessing, or iterating over a list in python
-    that resulted in notable performance decays with COBRA for
-    python.
+    """A combined dict and list
+    
+    This object behaves like a list, but has the O(1) speed
+    benefits of a dict when looking up elements by their id.
 
     """
+    _dict = {}
     def __init__(self, *args, **kwargs):
         list.__init__(self, *args, **kwargs)
-        self._dict = {}
-        self._object_dict = {}
         self._generate_index()
 
-
     def has_id(self, id):
-        return self._dict.has_key(id)
+        return id in self._dict
     
     def _check(self, id):
         """make sure duplicate id's are not added.
@@ -28,25 +23,16 @@ class DictList(list):
 
         """
         if id in self._dict:
-            raise ValueError, "id %s is already present in list" % str(id)
+            raise ValueError("id %s is already present in list" % str(id))
 
     def _generate_index(self):
-        """rebuild the _dict index
+        """rebuild the _dict index"""
+        self._dict = {v.id: k for k, v in enumerate(self)}
 
-        """
-        _dict = self._dict
-        object_dict = self._object_dict
-        _dict.clear()
-        object_dict.clear()
-        for k, v in enumerate(self):
-            _dict[v.id] = k
-            object_dict[v.id] = v
 
     def get_by_id(self, id):
-        """return the element with a matching id
-
-        """
-        return self._object_dict[id]
+        """return the element with a matching id"""
+        return self[self._dict[id]]
 
     def list_attr(self, attribute):
         """return a list of the given attribute for every object
@@ -57,12 +43,13 @@ class DictList(list):
     def query(self, search_function, attribute="id"):
         """query the list
 
-        search_function: this will be used to select which objects to return
-        This can be:
-            - a string, in which case any object.attribute containing
+        search_function: used to select which objects to return
+            * a string, in which case any object.attribute containing
               the string will be returned
-            - a compiled regular expression
-            - a boolean function which takes one argument and returns True
+
+            * a compiled regular expression
+
+            * a function which takes one argument and returns True
               for desired values
 
         attribute: the attribute to be searched for (default is 'id').
@@ -89,29 +76,30 @@ class DictList(list):
 
     # overriding default list functions with new ones
     def __setitem__(self, i, y):
+        if isinstance(i, slice):
+            for obj in y:  # need to be setting to a list
+                self._check(obj.id)
+            list.__setitem__(self, i, y)
+            self._generate_index()
+            return
+        self._dict.pop(self[i].id)
         the_id = y.id
         self._check(the_id)
-        super(DictList, self).__setitem__(i, y)
+        list.__setitem__(self, i, y)
         self._dict[the_id] = i
-        self._object_dict[the_id] = y
 
     def _replace_on_id(self, new_object):
-        """Allows one to replace an object by one with
-        the same id.
-        
-        """
+        """Replace an object by another with the same id."""
         the_id = new_object.id
         the_index = self._dict[the_id]
-        super(DictList, self).__setitem__(the_index, new_object)
-        self._object_dict[the_id] = new_object
-        
+        list.__setitem__(self, the_index, new_object)
 
     def append(self, object):
+        """append object to end"""
         the_id = object.id
         self._check(the_id)
         self._dict[the_id] = len(self)
-        super(DictList, self).append(object)
-        self._object_dict[the_id] = object
+        list.append(self, object)
 
     def union(self, iterable):
         """adds elements with id's not already in the model"""
@@ -122,50 +110,58 @@ class DictList(list):
                 append(i)
 
     def extend(self, iterable):
+        """extend list by appending elements from the iterable"""
         append = self.append
         for i in iterable:
             append(i)
 
-    def __add__(self, other, should_deepcopy=True):
+    def __add__(self, other, should_deepcopy=False):
         """
-        other: an DictList
+        other: iterable
+            other must contain only unique id's which do not intersect
+            with self
 
-        should_deepcopy: Boolean.  Allow for shallow copying, however,
-        this can cause problems if one doesn't know that the
-        items are referenceable from different id
+        should_deepcopy: Boolean. 
 
         """
         if should_deepcopy:
-            sum = deepcopy(self) # should this be deepcopy or shallow?
+            from copy import deepcopy
+            total = deepcopy(self)
         else:
-            sum = self
-        sum.extend(other)
-        sum._generate_index()
-        return sum
+            total = DictList()
+            total.extend(self)
+        total.extend(other)
+        return total
 
     def __iadd__(self, other):
         self.extend(other)
         return self
 
-    def index(self, id):
-        """
-        id: A string or a :class:`~cobra.core.Object`
+    def index(self, id, *args):
+        """Determine the position in the list
+
+        id: A string or a :class:`~cobra.core.Object.Object`
+
         """
         # because values are unique, start and stop are not relevant
+        if isinstance(id, string_types):
+            try:
+                return self._dict[id]
+            except KeyError:
+                raise ValueError("%s not found" % id)
         try:
-            return self._dict[id]
-        except:
             i = self._dict[id.id]
             if self[i] is not id:
                 raise ValueError(
                     "Another object with the identical id (%s) found" % id.id)
             return i
-        raise ValueError("%s not found" % str(i))
+        except KeyError:
+            raise ValueError("%s not found" % str(i))
 
     def __contains__(self, object):
         """DictList.__contains__(object) <==> object in DictList
-        object can either be the object to search for itself, or 
-        simply the id
+
+        object: str or :class:`~cobra.core.Object.Object`
 
         """
         if hasattr(object, "id"):
@@ -173,42 +169,26 @@ class DictList(list):
         # allow to check with the object itself in addition to the id
         else:
             the_id = object
-        return self._dict.has_key(the_id)
+        return the_id in self._dict
 
     def __copy__(self):
         self._dict.clear()
-        self._object_dict.clear()
         the_copy = copy(super(DictList, self))
         self._generate_index()
         the_copy._generate_index()
         return the_copy
 
     def __deepcopy__(self, *args, **kwargs):
-        self._dict.clear()
-        self._object_dict.clear()
-        the_copy = deepcopy(super(DictList, self), *args, **kwargs)
-        self._generate_index()
-        the_copy._generate_index()
-        return the_copy
-    
-    # The following deepcopy function will be faster because it does not
-    # regenerate the index for the current object.
-    # TODO consider using
-    #def __deepcopy__(self, *args, **kwargs):
-    #    _dict = self._dict
-    #    _object_dict = self._object_dict
-    #    self._dict = {}
-    #    self._object_dict = {}
-    #    the_copy = deepcopy(super(DictList, self), *args, **kwargs)
-    #    self._dict = _dict
-    #    self._object_dict = _object_dict
-    #    the_copy._generate_index()
-    #    return the_copy
+        _dict = self._dict
+        self._dict = {}
+        new = deepcopy(super(DictList, self), *args, **kwargs)
+        self._dict = _dict
+        return new
 
     def insert(self, index, object):
+        """insert object before index"""
         self._check(object.id)
-        super(DictList, self).insert(index, object)
-        self._object_dict[object.id] = object
+        list.insert(self, index, object)
         # all subsequent entries now have been shifted up by 1
         _dict = self._dict
         for i in _dict:
@@ -218,60 +198,72 @@ class DictList(list):
         _dict[object.id] = index
 
     def pop(self, *args):
-        value = super(DictList, self).pop(*args)
+        """remove and return item at index (default last)."""
+        value = list.pop(self, *args)
         index = self._dict.pop(value.id)
-        self._object_dict.pop(value.id)
         # If the pop occured from a location other than the end of the list,
         # we will need to subtract 1 from every entry afterwards
         if len(args) == 0 or args == [-1]: # removing from the end of the list
             return
         _dict = self._dict
-        for i in _dict:
-            j = _dict[i]
+        for i, j in iteritems(_dict):
             if j > index:
                 _dict[i] = j - 1
         return value
 
     def remove(self, x):
+        """remove first occurrence of value."""
         # Each item is unique in the list which allows this
         # It is much faster to do a dict lookup than n string comparisons
         self.pop(self.index(x))
 
     # these functions are slower because they rebuild the _dict every time
-    def reverse(self, *args, **kwargs):
-        super(DictList, self).reverse(*args, **kwargs)
+    def reverse(self):
+        """reverse *IN PLACE*"""
+        list.reverse(self)
         self._generate_index()
 
-    def sort(self, *args, **kwargs):
-        super(DictList, self).sort(*args, **kwargs)
+    def sort(self, cmp=None, key=None, reverse=False):
+        """stable sort *IN PLACE*
+
+        cmp(x, y) -> -1, 0, 1
+
+        """
+        if key is None:
+            key = lambda i: i.id
+        list.sort(self, cmp=cmp, key=key, reverse=reverse)
         self._generate_index()
 
     def __setslice__(self, *args, **kwargs):
-        super(DictList, self).__setslice__(*args, **kwargs)
+        list.__setslice__(self, *args, **kwargs)
         self._generate_index()
 
     def __delslice__(self, *args, **kwargs):
-        super(DictList, self).__delslice__(*args, **kwargs)
+        list.__delslice__(self, *args, **kwargs)
         self._generate_index()
 
-    def __delitem__(self, *args, **kwargs):
-        super(DictList, self).__delitem__(*args, **kwargs)
-        self._generate_index()
+    def __delitem__(self, index):
+        removed = self[index]
+        list.__delitem__(self, index)
+        if isinstance(removed, list):
+            self._generate_index()
+            return
+        _dict = self._dict
+        _dict.pop(removed.id)
+        for i, j in iteritems(_dict):
+            if j > index:
+                _dict[i] = j - 1
 
     def __getattr__(self, attr):
-        # makes items attributes as well
         try:
-            return super(DictList, self).__getattribute__(attr)
-        except:
-            try:
-                func = super(DictList, self).__getattribute__("get_by_id")
-                return func(attr)
-            except:
-                raise AttributeError("DictList has no attribute or entry %s" % \
-                    (attr))
+            return self[self.__dict__["_dict"][attr]]
+        except KeyError:
+            raise AttributeError("DictList has no attribute or entry %s" % \
+                (attr))
 
     def __dir__(self):
         # override this to allow tab complete of items by their id
-        attributes = self.__class__.__dict__.keys()
+        attributes = dir(self.__class__)
+        attributes.extend(self.__dict__.keys())
         attributes.extend(self._dict.keys())
         return attributes

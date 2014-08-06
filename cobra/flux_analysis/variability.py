@@ -1,49 +1,67 @@
-from __future__ import with_statement
-#cobra.flux_analysis.variablity.py
-#runs flux variablity analysis on a Model object.
-from math import floor,ceil
-from copy import deepcopy
-from ..core.Metabolite import Metabolite
-try:
-    from ..external.ppmap import ppmap
-    __parallel_mode_available = True
-except:
-    __parallel_mode_available = False
-#TODO: Add in a ppmap section for running in parallel
-def flux_variability_analysis_wrapper(keywords):
-    """Provides an interface to call flux_variability_analysis from ppmap
-    
-    """
-    try:
-        from cPickle import dump
-    except:
-        from pickle import dump
-    import sys
-    #Need to do a top level import because of how the parallel processes are called
-    sys.path.insert(0, "../..")
-    from cobra.flux_analysis.variability import flux_variability_analysis
-    sys.path.pop(0)
-    results_dict = {}
-    new_objective = keywords.pop('new_objective')
-    output_directory = None
-    if 'output_directory' in keywords:
-        output_directory = keywords.pop('output_directory')
-    if not hasattr(new_objective, '__iter__'):
-        new_objective = [new_objective]
-    for the_objective in new_objective:
-        the_result = results_dict[the_objective] = flux_variability_analysis(**keywords)
-        if output_directory:
-            with open('%s%s.pickle'%(output_directory,
-                                     the_objective), 'w') as out_file:
-                dump(the_result, out_file)
-    if len(new_objective) == 1:
-        return the_result
-    else:
-        return results_dict
+from warnings import warn
 
-def flux_variability_analysis(cobra_model, fraction_of_optimum=1.,
+from ..external.six import iteritems, string_types
+from ..core.Metabolite import Metabolite
+from ..solvers import solver_dict, get_solver_name
+
+def flux_variability_analysis(cobra_model, reaction_list=None,
+                              fraction_of_optimum=1.0, solver=None,
+                              objective_sense="maximize", **solver_args):
+    """Runs flux variability analysis to find max/min flux values
+
+    cobra_model : :class:`~cobra.core.Model`:
+
+    reaction_list : list of :class:`~cobra.core.Reaction`: or their id's
+        The id's for which FVA should be run. If this is None, the bounds
+        will be comptued for all reactions in the model.
+
+    fraction_of_optimum : fraction of optimum which must be maintained.
+        The original objective reaction is constrained to be greater than
+        maximal_value * fraction_of_optimum
+
+    solver : string of solver name
+        If None is given, the default solver will be used.
+
+    """
+    if reaction_list is None and "the_reactions" in solver_args:
+        reaction_list = solver_args.pop("the_reactions")
+        from warnings import warn
+        warn("the_reactions is deprecated. Please use reaction_list=")
+    if reaction_list is None:
+        reaction_list = cobra_model.reactions
+    else:
+        reaction_list = [cobra_model.reactions.get_by_id(i) if isinstance(i, string_types) else i for i in reaction_list]
+    solver = solver_dict[get_solver_name() if solver is None else solver]
+    lp = solver.create_problem(cobra_model)
+    solver.solve_problem(lp, objective_sense=objective_sense)
+    solution = solver.format_solution(lp, cobra_model)
+    if solution.status != "optimal":
+        raise ValueError("FVA requires the solution status to be optimal, not "
+                         + solution.status)
+    # set all objective coefficients to 0
+    for i, r in enumerate(cobra_model.reactions):
+        if r.objective_coefficient != 0:
+            f = solution.x_dict[r.id]
+            new_bounds = (f * fraction_of_optimum, f)
+            solver.change_variable_bounds(lp, i, min(new_bounds), max(new_bounds))
+            solver.change_variable_objective(lp, i, 0.)
+    # perform fva
+    fva_results = {}
+    for r in reaction_list:
+        i = cobra_model.reactions.index(r)
+        fva_results[r.id] = {}
+        solver.change_variable_objective(lp, i, 1.)
+        solver.solve_problem(lp, objective_sense="maximize", **solver_args)
+        fva_results[r.id]["maximum"] = solver.get_objective_value(lp)
+        solver.solve_problem(lp, objective_sense="minimize", **solver_args)
+        fva_results[r.id]["minimum"] = solver.get_objective_value(lp)
+        # revert the problem to how it was before
+        solver.change_variable_objective(lp, i, 0.)
+    return fva_results
+
+def flux_variability_analysis_legacy(cobra_model, fraction_of_optimum=1.,
                               objective_sense='maximize', the_reactions=None,
-                              allow_loops=True, solver='glpk',
+                              allow_loops=True, solver=None,
                               the_problem='return', tolerance_optimality=1e-6,
                               tolerance_feasibility=1e-6, tolerance_barrier=1e-8,
                               lp_method=1, lp_parallel=0, new_objective=None,
@@ -81,6 +99,9 @@ def flux_variability_analysis(cobra_model, fraction_of_optimum=1.,
     of just a single value.  This will be done in cobra.flux_analysis.solvers.
     
     """
+    from math import floor,ceil
+    if solver is None:
+        solver = get_solver_name()
     #Need to copy the model because we're updating reactions.  However,
     #we can always just remove them.
     if isinstance(the_problem, float):
@@ -108,6 +129,7 @@ def flux_variability_analysis(cobra_model, fraction_of_optimum=1.,
         the_reactions = map(cobra_model.reactions.get_by_id, the_reactions)
     #If parallel mode is called for then give it a try
     if number_of_processes > 1 and __parallel_mode_available:
+        from copy import deepcopy
         the_problem = wt_solution #Solver objects are not thread safe
         the_reactions = [x.id for x in the_reactions]
         parameter_dict = dict([(x, eval(x))
@@ -184,7 +206,7 @@ def flux_variability_analysis(cobra_model, fraction_of_optimum=1.,
         for the_reaction in the_reactions:
             tmp_dict = {}
             the_problem = basic_problem
-            for the_sense, the_description in the_sense_dict.iteritems():
+            for the_sense, the_description in iteritems(the_sense_dict):
                 the_problem = cobra_model.optimize(solver=solver,
                                                    new_objective=the_reaction,
                                                    objective_sense=the_sense,
@@ -199,14 +221,14 @@ def flux_variability_analysis(cobra_model, fraction_of_optimum=1.,
                 tmp_dict[the_description] = cobra_model.solution.f
             variability_dict[the_reaction.id] = tmp_dict
         if not copy_model:
-            [setattr(k, 'objective_coefficient', v)
-             for k, v in original_objectives.iteritems()]
+            for k, v in iteritems(original_objectives):
+                k.objective_coefficient = v
             objective_metabolite.remove_from_model()
     return variability_dict
 
 
 def find_blocked_reactions(cobra_model, the_reactions=None, allow_loops=True,
-                            solver='glpk', the_problem='return',
+                            solver=None, the_problem='return',
                            tolerance_optimality=1e-9,
                            open_exchanges=False, **kwargs):
     """Finds reactions that cannot carry a flux with the current
@@ -214,13 +236,15 @@ def find_blocked_reactions(cobra_model, the_reactions=None, allow_loops=True,
     analysis.
     
     """
-    print 'This needs to be updated to deal with external boundaries'
+    if solver is None:
+        solver = get_solver_name()
+    warn('This needs to be updated to deal with external boundaries')
     cobra_model = cobra_model.copy()
     blocked_reactions = []
     if not the_reactions:
         the_reactions = cobra_model.reactions
     if open_exchanges:
-        print 'DEPRECATED: Move to using the Reaction.boundary attribute'
+        warn('DEPRECATED: Move to using the Reaction.boundary attribute')
         exchange_reactions = [x for x in cobra_model.reactions
                               if x.startswith('EX')]
         for the_reaction in exchange_reactions:
@@ -240,22 +264,4 @@ def find_blocked_reactions(cobra_model, the_reactions=None, allow_loops=True,
                           if max(map(abs,v.values())) < tolerance_optimality]
     return(blocked_reactions)
 
-
-def run_fva(solver='cplex'):
-    """
-    For debugging purposes only
-    
-    """
-    from test import salmonella_pickle
-    try:
-        from cPickle import load
-    except:
-        from pickle import load
-    with open(salmonella_pickle) as in_file:
-        cobra_model = load(in_file)
-    fva_out =  flux_variability_analysis(cobra_model,
-                                         the_reactions=cobra_model.reactions,#[100:140],
-                                         solver=solver,number_of_processes=1)
-
-                             
 

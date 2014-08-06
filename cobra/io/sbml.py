@@ -6,7 +6,10 @@ from os.path import isfile
 from os import name as __name
 from copy import deepcopy
 from time import time
+from warnings import warn
 import re
+from math import isnan, isinf
+
 #
 if __name == 'java':
     from org.sbml.jsbml import SBMLDocument, SpeciesReference, KineticLaw, Parameter
@@ -48,10 +51,11 @@ def parse_legacy_id(the_id, the_compartment=None, the_type='metabolite',
 def create_cobra_model_from_sbml_file(sbml_filename, old_sbml=False, legacy_metabolite=False,
                                       print_time=False, use_hyphens=False):
     """convert an SBML XML file into a cobra.Model object.  Supports
-    SBML Level 2 Versions 1 and 4
+    SBML Level 2 Versions 1 and 4.  The function will detect if the SBML fbc package is used in the file
+    and run the converter if the fbc package is used.
 
     sbml_filename: String.
-    
+
     old_sbml:  Boolean. Set to True if the XML file has metabolite
     formula appended to metabolite names.  This was a poorly designed
     artifact that persists in some models.
@@ -60,7 +64,7 @@ def create_cobra_model_from_sbml_file(sbml_filename, old_sbml=False, legacy_meta
     the compartment id appended after an underscore (e.g. _c for cytosol).  This
     has not been implemented but will be soon.
 
-    print_time:  Boolean.  Print the time requirements for different sections
+    print_time: deprecated
 
     use_hyphens:   Boolean.  If True, double underscores (__) in an SBML ID will be converted to hyphens
 
@@ -76,13 +80,15 @@ def create_cobra_model_from_sbml_file(sbml_filename, old_sbml=False, legacy_meta
     reaction_re = re.compile('^R_')
     compartment_re = re.compile('^C_')
     if print_time:
-        start_time = time()
+        warn("print_time is deprecated")
     model_doc = readSBML(sbml_filename)
-    if print_time:
-       print('Loading %s took %1.2f seconds'%(sbml_filename,
-                                              time()-start_time))
-                                             
-     
+    if (model_doc.getPlugin("fbc") != None):
+        from libsbml import ConversionProperties, LIBSBML_OPERATION_SUCCESS
+        conversion_properties = ConversionProperties()
+        conversion_properties.addOption("convert fbc to cobra", True, "Convert FBC model to Cobra model")
+        result = model_doc.convert(conversion_properties)
+        if result != LIBSBML_OPERATION_SUCCESS:
+            raise(Exception("Conversion of SBML+fbc to COBRA failed"))
     sbml_model = model_doc.getModel()
     sbml_model_id = sbml_model.getId()
     sbml_species = sbml_model.getListOfSpecies()
@@ -101,8 +107,9 @@ def create_cobra_model_from_sbml_file(sbml_filename, old_sbml=False, legacy_meta
         compartment_dict = new_dict
         legacy_compartment_converter = dict([(v,k)
                                              for k, v in compartment_dict.items()])
-    if print_time:
-        start_time = time()
+
+    cobra_model = Model(sbml_model_id)
+    metabolites = []
     metabolite_dict = {}
     #Convert sbml_metabolites to cobra.Metabolites
     for sbml_metabolite in sbml_species:
@@ -129,8 +136,25 @@ def create_cobra_model_from_sbml_file(sbml_filename, old_sbml=False, legacy_meta
             tmp_metabolite.id = metabolite_re.split(tmp_metabolite.id)[-1].replace('-','__')
         tmp_metabolite.name = sbml_metabolite.getName()
         tmp_formula = ''
-        tmp_metabolite.charge = sbml_metabolite.getCharge()
         tmp_metabolite.notes = parse_legacy_sbml_notes(sbml_metabolite.getNotesString())
+        tmp_metabolite.charge = sbml_metabolite.getCharge()
+        if "CHARGE" in tmp_metabolite.notes:
+            note_charge = tmp_metabolite.notes["CHARGE"][0]
+            try:
+                note_charge = float(note_charge)
+                if note_charge == int(note_charge):
+                    note_charge = int(note_charge)
+            except:
+                warn("charge of %s is not a number (%s)" % (tmp_metabolite.id, str(note_charge)))
+            else:
+                if tmp_metabolite.charge == 0 or tmp_metabolite.charge == note_charge:  # get_charge() when unspecified is 0
+                    tmp_metabolite.charge = note_charge
+                    tmp_metabolite.notes.pop("CHARGE")
+                else:  # tmp_metabolite.charge != note_charge
+                    msg = "different charges specified for %s (%d and %d)"
+                    msg = msg % (tmp_metabolite.id, tmp_metabolite.charge, note_charge)
+                    warn(msg)
+
         for the_key in tmp_metabolite.notes.keys():
             if the_key.lower() == 'formula':
                 tmp_formula = tmp_metabolite.notes.pop(the_key)[0]
@@ -140,13 +164,9 @@ def create_cobra_model_from_sbml_file(sbml_filename, old_sbml=False, legacy_meta
             tmp_metabolite.name = tmp_metabolite.name[:-len(tmp_formula)-1]
         tmp_metabolite.formula = Formula(tmp_formula)
         metabolite_dict.update({metabolite_id: tmp_metabolite})
-    if print_time:
-       print 'Parsing %s took %1.2f seconds'%('metabolites',
-                                              time()-start_time)
+        metabolites.append(tmp_metabolite)
+    cobra_model.add_metabolites(metabolites)
 
-
-    if print_time:
-        start_time = time()
     #Construct the vectors and matrices for holding connectivity and numerical info
     #to feed to the cobra toolbox.
     #Always assume steady state simulations so b is set to 0
@@ -169,23 +189,28 @@ def create_cobra_model_from_sbml_file(sbml_filename, old_sbml=False, legacy_meta
             if tmp_metabolite_id in metabolite_dict:
                 tmp_metabolite = deepcopy(metabolite_dict[tmp_metabolite_id])
                 cobra_metabolites[tmp_metabolite] = -sbml_metabolite.getStoichiometry()
-            else:
-                reaction.boundary = 'system_boundary'
         for sbml_metabolite in sbml_reaction.getListOfProducts():
             tmp_metabolite_id = sbml_metabolite.getSpecies()
             #This deals with boundary metabolites
             if tmp_metabolite_id in metabolite_dict:
                 tmp_metabolite = deepcopy(metabolite_dict[tmp_metabolite_id])
                 cobra_metabolites[tmp_metabolite] = sbml_metabolite.getStoichiometry()
-            else:
-                reaction.boundary = 'system_boundary'
-
+        reaction.add_metabolites(cobra_metabolites)
         #Parse the kinetic law info here.
         parameter_dict = {}
-        #            if isinstance(the_reaction.getKineticLaw(), NoneType):
+        #If lower and upper bounds are specified in the Kinetic Law then
+        #they override the sbml reversible attribute.  If they are not
+        #specified then the bounds are determined by getReversible.
         if not sbml_reaction.getKineticLaw():
-            parameter_dict['lower_bound'] = __default_lower_bound
-            parameter_dict['upper_bound'] = __default_upper_bound
+            
+            if sbml_reaction.getReversible():
+                parameter_dict['lower_bound'] = __default_lower_bound
+                parameter_dict['upper_bound'] = __default_upper_bound
+            else:
+                #Assume that irreversible reactions only proceed from left to right.
+                parameter_dict['lower_bound'] = 0
+                parameter_dict['upper_bound'] = __default_upper_bound
+                
             parameter_dict['objective_coefficient'] = __default_objective_coefficient
         else:
             for sbml_parameter in sbml_reaction.getKineticLaw().getListOfParameters():
@@ -195,8 +220,10 @@ def create_cobra_model_from_sbml_file(sbml_filename, old_sbml=False, legacy_meta
             reaction.lower_bound = parameter_dict['lower_bound']
         elif 'lower bound' in parameter_dict:
             reaction.lower_bound = parameter_dict['lower bound']
-        else:
+        elif sbml_reaction.getReversible():
             reaction.lower_bound = __default_lower_bound
+        else:
+            reaction.lower_bound = 0
 
         if 'upper_bound' in parameter_dict:
             reaction.upper_bound = parameter_dict['upper_bound']
@@ -212,61 +239,52 @@ def create_cobra_model_from_sbml_file(sbml_filename, old_sbml=False, legacy_meta
         else:
             reaction.objective_coefficient = __default_objective_coefficient
 
+        # ensure values are not set to nan or inf
+        if isnan(reaction.lower_bound) or isinf(reaction.lower_bound):
+            reaction.lower_bound = __default_lower_bound
+        if isnan(reaction.upper_bound) or isinf(reaction.upper_bound):
+            reaction.upper_bound = __default_upper_bound
+
         reaction_note_dict = parse_legacy_sbml_notes(sbml_reaction.getNotesString())
         #Parse the reaction notes.
         #POTENTIAL BUG: DEALING WITH LEGACY 'SBML' THAT IS NOT IN A
         #STANDARD FORMAT
         #TODO: READ IN OTHER NOTES AND GIVE THEM A reaction_ prefix.
         #TODO: Make sure genes get added as objects
-        if reaction_note_dict.has_key('GENE ASSOCIATION'):
+        if 'GENE ASSOCIATION' in reaction_note_dict:
             reaction.gene_reaction_rule = reaction_note_dict['GENE ASSOCIATION'][0]
-            reaction.parse_gene_association() 
-            if reaction_note_dict.has_key('GENE LIST'):
+            if 'GENE LIST' in reaction_note_dict:
                 reaction.systematic_names = reaction_note_dict['GENE LIST'][0]
-            elif reaction_note_dict.has_key('GENES') and \
+            elif 'GENES' in reaction_note_dict and \
                      reaction_note_dict['GENES'] != ['']:
                 reaction.systematic_names = reaction_note_dict['GENES'][0]
-            elif reaction_note_dict.has_key('LOCUS'):
+            elif 'LOCUS' in reaction_note_dict:
                 gene_id_to_object = dict([(x.id, x) for x in reaction._genes])
                 for the_row in reaction_note_dict['LOCUS']:
                     tmp_row_dict = {}
                     the_row = 'LOCUS:' + the_row.lstrip('_').rstrip('#')
                     for the_item in the_row.split('#'):
-                        try:
-                            k, v = the_item.split(':')
-                            tmp_row_dict[k] = v
-                        except ValueError, e:
-                            print the_item
-                            raise e
+                        k, v = the_item.split(':')
+                        tmp_row_dict[k] = v
                     tmp_locus_id = tmp_row_dict['LOCUS']
                     if 'TRANSCRIPT' in tmp_row_dict:
-                            tmp_locus_id = tmp_locus_id + '.' + tmp_row_dict['TRANSCRIPT']
-                    gene_id_to_object[tmp_locus_id].name = tmp_row_dict['ABBREVIATION']
+                        tmp_locus_id = tmp_locus_id + '.' + tmp_row_dict['TRANSCRIPT']
+                    
+                    if 'ABBREVIATION' in tmp_row_dict:
+                        gene_id_to_object[tmp_locus_id].name = tmp_row_dict['ABBREVIATION']
 
-        if reaction_note_dict.has_key('SUBSYSTEM'):
+        if 'SUBSYSTEM' in reaction_note_dict:
             reaction.subsystem = reaction_note_dict['SUBSYSTEM'][0]   
 
-        reaction.reversibility = int(sbml_reaction.getReversible())
-        #TODO: Use the cobra.metabolite objects here.
-        reaction.add_metabolites(cobra_metabolites)
 
-    if print_time:
-       print 'Parsing %s took %1.2f seconds'%('reactions',
-                                              time()-start_time)
 
-    if print_time:
-        start_time = time()
     #Now, add all of the reactions to the model.
-    cobra_model = Model(sbml_model_id)
     cobra_model.description = sbml_model.getId()
     #Populate the compartment list - This will be done based on cobra.Metabolites
     #in cobra.Reactions in the future.
     cobra_model.compartments = compartment_dict
 
     cobra_model.add_reactions(cobra_reaction_list)
-    if print_time:
-        print '%s took %1.2f seconds'%('Adding reactions',
-                                       time()-start_time)
         #cobra_model.update_rules()
     return cobra_model
 
@@ -275,7 +293,6 @@ def parse_legacy_sbml_notes(note_string, note_delimiter = ':'):
     """Deal with legacy SBML format issues arising from the
     COBRA Toolbox for MATLAB and BiGG.ucsd.edu developers.
 
-	
     """
     note_dict = {}
     start_tag = '<p>'
@@ -291,22 +308,25 @@ def parse_legacy_sbml_notes(note_string, note_delimiter = ':'):
             note_delimiter_index = the_note.index(note_delimiter)
             note_field = the_note[:note_delimiter_index].lstrip(' ').rstrip(' ').replace('_',' ').upper()
             note_value = the_note[(note_delimiter_index+1):].lstrip(' ').rstrip(' ')
-            if note_dict.has_key(note_field ):
+            if note_field in note_dict:
                 note_dict[note_field ].append(note_value)
             else:
                 note_dict[note_field] = [note_value]
         note_string = note_string[(note_end+len(end_tag)): ]
 
-    
-    return note_dict
+    if 'CHARGE' in note_dict and note_dict['CHARGE'][0].lower() in ['none', 'na', 'nan']:
+        note_dict.pop('CHARGE') #Remove non-numeric charges
+        
+    return(note_dict)
 
 
 def write_cobra_model_to_sbml_file(cobra_model, sbml_filename,
                                    sbml_level=2, sbml_version=1,
-                                   print_time=False):
+                                   print_time=False,
+                                   use_fbc_package=True):
     """Write a cobra.Model object to an SBML XML file.
 
-    cobra_model:  A cobra.Model object
+    cobra_model:  :class:`~cobra.core.Model.Model` object
 
     sbml_filename:  The file to write the SBML XML to.
 
@@ -314,22 +334,19 @@ def write_cobra_model_to_sbml_file(cobra_model, sbml_filename,
 
     sbml_version: 1 is the only version supported at the moment.
 
-    print_time:  Boolean.  Print the time requirements for different sections
+    use_fbc_package: Boolean.
+        Convert the model to the FBC package format to improve portability.
+        http://sbml.org/Documents/Specifications/SBML_Level_3/Packages/Flux_Balance_Constraints_(flux)
+
 
     TODO: Update the NOTES to match the SBML standard and provide support for
     Level 2 Version 4
-    
+
     """
-    #Add in the common compartment abbreviations.  If there are additional compartments
-    #they also need to be added.
     note_start_tag, note_end_tag = '<p>', '</p>'
     if sbml_level > 2 or (sbml_level == 2 and sbml_version == 4):
         note_start_tag, note_end_tag = '<html:p>', '</html:p>'
         
-    if not hasattr(cobra_model, 'compartments'):
-        cobra_model.compartments = {'c': 'cytosol',
-                                    'p': 'periplasm',
-                                    'e': 'extracellular'}
     
     sbml_doc = SBMLDocument(sbml_level, sbml_version)
     sbml_model = sbml_doc.createModel(cobra_model.description.split('.')[0])
@@ -348,7 +365,12 @@ def write_cobra_model_to_sbml_file(cobra_model, sbml_filename,
     sbml_unit.setMultiplier(1.0/60/60)
     sbml_unit.setExponent(-1)
 
-    
+    #Add in the common compartment abbreviations.  If there are additional compartments
+    #they also need to be added.
+    if not cobra_model.compartments:
+        cobra_model.compartments = {'c': 'cytosol',
+                                    'p': 'periplasm',
+                                    'e': 'extracellular'}    
     for the_key in cobra_model.compartments.keys():
         sbml_comp = sbml_model.createCompartment()
         sbml_comp.setId(the_key)
@@ -356,7 +378,7 @@ def write_cobra_model_to_sbml_file(cobra_model, sbml_filename,
         sbml_comp.setSize(1) #Just to get rid of warnings
 
     if print_time:
-        start_time = time()
+        warn("print_time is deprecated")
     #Use this dict to allow for fast look up of species id
     #for references created in the reaction section.
     metabolite_dict = {}
@@ -367,11 +389,6 @@ def write_cobra_model_to_sbml_file(cobra_model, sbml_filename,
                                                                  note_start_tag=note_start_tag,
                                                                  note_end_tag=note_end_tag)
 
-    if print_time:
-        print 'Adding %s took %1.2f seconds'%('metabolites',
-                                              time()-start_time)
-    if print_time:
-        start_time = time()
     for the_reaction in cobra_model.reactions:
         #This is probably the culprit.  Including cobra.Reaction
         #objects explicitly in cobra.Model will speed this up.
@@ -379,10 +396,7 @@ def write_cobra_model_to_sbml_file(cobra_model, sbml_filename,
         #Need to remove - for proper SBML.  Replace with __
         the_reaction_id = 'R_' + the_reaction.id.replace('-','__' )
         sbml_reaction.setId(the_reaction_id)
-        if the_reaction.reversibility == 1:
-            sbml_reaction.setReversible(True)
-        else:
-            sbml_reaction.setReversible(False)
+        sbml_reaction.setReversible(the_reaction.reversibility)
         if the_reaction.name:
             sbml_reaction.setName(the_reaction.name)
         else:
@@ -401,7 +415,7 @@ def write_cobra_model_to_sbml_file(cobra_model, sbml_filename,
             species_reference.setStoichiometry(abs(sbml_stoichiometry))
         #Deal with the case where the reaction is a boundary reaction
         if len(the_reaction._metabolites) == 1:
-            the_metabolite, the_coefficient = the_reaction._metabolites.items()[0]
+            the_metabolite, the_coefficient = list(the_reaction._metabolites.items())[0]
             the_metabolite = the_metabolite.copy()
             metabolite_id = add_sbml_species(sbml_model, the_metabolite,
                                              note_start_tag=note_start_tag,
@@ -444,13 +458,36 @@ def write_cobra_model_to_sbml_file(cobra_model, sbml_filename,
                                                                  the_reaction.subsystem,
                                                                  note_end_tag))
 
-    if print_time:
-       print 'Adding %s took %1.2f seconds'%('reactions',
-                                             time()-start_time)
 
+    if use_fbc_package:
+        try:
+            from libsbml import ConversionProperties, LIBSBML_OPERATION_SUCCESS
+            conversion_properties = ConversionProperties()
+            conversion_properties.addOption("convert cobra", True, "Convert Cobra model")
+            result = sbml_doc.convert(conversion_properties)
+            if result != LIBSBML_OPERATION_SUCCESS:
+                raise Exception("Conversion of COBRA to SBML+fbc failed")
+        except Exception as e:
+            error_string = 'Error saving as SBML+fbc. %s'
+            try:
+                #Check whether the FbcExtension is there
+                from libsbml import FbcExtension
+                error_string = error_string%e
+            except ImportError:
+                error_string = error_string%'FbcExtension not available in libsbml. ' +\
+                               'If use_fbc_package == True then libsbml must be compiled with ' +\
+                               'the fbc extension. '
+                from libsbml import getLibSBMLDottedVersion
+                _sbml_version = getLibSBMLDottedVersion()
+                _major, _minor, _patch = map(int, _sbml_version.split('.'))
+                if _major < 5 or (_major == 5 and _minor < 8):
+                    error_string += "You've got libsbml %s installed.   You need 5.8.0 or later with the fbc package"
+
+            raise(Exception(error_string))
     writeSBML(sbml_doc, sbml_filename)
 
-def add_sbml_species(sbml_model, cobra_metabolite,                                                                  note_start_tag, note_end_tag, boundary_metabolite=False):
+def add_sbml_species(sbml_model, cobra_metabolite, note_start_tag,
+                     note_end_tag, boundary_metabolite=False):
     """A helper function for adding cobra metabolites to an sbml model.
 
     sbml_model: sbml_model object
@@ -485,7 +522,7 @@ def add_sbml_species(sbml_model, cobra_metabolite,                              
     try:
         sbml_species.setCompartment(the_compartment)
     except:
-        print 'metabolite failed: %s'%the_id
+        warn('metabolite failed: ' + the_id)
         return cobra_metabolite
     if cobra_metabolite.charge is not None:
         sbml_species.setCharge(cobra_metabolite.charge)
@@ -498,12 +535,14 @@ def add_sbml_species(sbml_model, cobra_metabolite,                              
                                               note_end_tag)
         if hasattr(cobra_metabolite.notes, 'items'):
             for the_id_type, the_id in cobra_metabolite.notes.items():
+                if the_id_type.lower() == 'charge':
+                    continue #Use of notes['CHARGE'] has been deprecated in favor of metabolite.charge
                 if not isinstance(the_id_type, str):
-                    the_id_type = repr(the_id_type)
+                    the_id_type = str(the_id_type)
                 if hasattr(the_id, '__iter__') and len(the_id) == 1:
                     the_id = the_id[0]
                 if not isinstance(the_id, str):
-                    the_id = repr(the_id)
+                    the_id = str(the_id)
                 tmp_note += '%s%s: %s%s'%(note_start_tag,
                                              the_id_type,
                                              the_id, note_end_tag)
@@ -511,7 +550,7 @@ def add_sbml_species(sbml_model, cobra_metabolite,                              
     return metabolite_id
 
 
-def fix_legacy_id(id, use_hyphens=False):
+def fix_legacy_id(id, use_hyphens=False, fix_compartments=False):
     id = id.replace('_DASH_', '__')
     id = id.replace('_FSLASH_', '/')
     id = id.replace('_BSLASH_', "\\")
@@ -530,6 +569,11 @@ def fix_legacy_id(id, use_hyphens=False):
         id = id.replace('__', '-')
     else:
         id = id.replace("-", "__")
+    if fix_compartments:
+        if len(id) > 2:
+            if (id[-3] == "(" and id[-1] == ")") or \
+               (id[-3] == "[" and id[-1] == "]"):
+                id = id[:-3] + "_" + id[-2]
     return id
 
 
@@ -545,7 +589,7 @@ def read_legacy_sbml(filename, use_hyphens=False):
             reaction.id = reaction.id[:-3] + "_e"
     model.reactions._generate_index()
     # remove boundary metabolites (end in _b and only present in exchanges)
-    for metabolite in model.metabolites:
+    for metabolite in list(model.metabolites):
         if not metabolite.id.endswith("_b"):
             continue
         if len(metabolite._reaction) == 1:

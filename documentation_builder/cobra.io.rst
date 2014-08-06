@@ -1,27 +1,38 @@
-io Package
-==========
+cobra.io package
+================
 
-:mod:`io` Package
------------------
+Submodules
+----------
 
-.. automodule:: cobra.io
+cobra.io.json module
+--------------------
+
+.. automodule:: cobra.io.json
     :members:
     :undoc-members:
     :show-inheritance:
 
-:mod:`mat` Module
------------------
+cobra.io.mat module
+-------------------
 
 .. automodule:: cobra.io.mat
     :members:
     :undoc-members:
     :show-inheritance:
 
-:mod:`sbml` Module
-------------------
+cobra.io.sbml module
+--------------------
 
 .. automodule:: cobra.io.sbml
     :members:
     :undoc-members:
     :show-inheritance:
 
+
+Module contents
+---------------
+
+.. automodule:: cobra.io
+    :members:
+    :undoc-members:
+    :show-inheritance:

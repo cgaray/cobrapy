@@ -31,9 +31,8 @@ def _cell(x):
 def load_matlab_model(infile_path, variable_name=None):
     """Load a cobra model stored as a .mat file
 
-    Parameters
-    ----------
     infile_path : str
+
     variable_name : str, optional
         The variable name of the model in the .mat file. If this is not
         specified, then the first MATLAB variable which looks like a COBRA
@@ -65,7 +64,10 @@ def load_matlab_model(infile_path, variable_name=None):
                 <= set(m.dtype.names):
             continue
         model = Model()
-        model.id = m["description"][0, 0][0]
+        if "description" in m:
+            model.id = m["description"][0, 0][0]
+        else:
+            model.id = possible_name
         model.description = model.id
         for i, name in enumerate(m["mets"][0, 0]):
             new_metabolite = Metabolite()
@@ -84,8 +86,8 @@ def load_matlab_model(infile_path, variable_name=None):
             new_reaction.upper_bound = float(m["ub"][0, 0][i][0])
             new_reaction.objective_coefficient = float(m["c"][0, 0][i][0])
             try:
-                new_reaction.add_gene_reaction_rule(str(m['grRules'][0, 0][i][0][0]))
-            except IndexError:
+                new_reaction.gene_reaction_rule = str(m['grRules'][0, 0][i][0][0])
+            except (IndexError, ValueError):
                 None
             try:
                 new_reaction.name = str(m["rxnNames"][0, 0][i][0][0])
@@ -105,11 +107,9 @@ def save_matlab_model(model, file_name):
     """Save the cobra model as a .mat file.
 
     This .mat file can be used directly in the MATLAB version of COBRA.
-    .. note:: This function works best with scipy 0.11b1 or later
 
-    Parameters
-    ----------
-    model : cobra.Model
+    model : :class:`~cobra.core.Model.Model` object
+
     file_name : str or file-like object
 
     """

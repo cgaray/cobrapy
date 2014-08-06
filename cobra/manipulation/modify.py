@@ -1,7 +1,8 @@
 #cobra.manipulation.modify.py
 from copy import deepcopy
-from cobra.core.Reaction import Reaction
+from .. import Reaction
 from warnings import warn
+
 def initialize_growth_medium(cobra_model, the_medium='MgM', 
                              external_boundary_compartment='e',
                              external_boundary_reactions=None,
@@ -66,7 +67,7 @@ def initialize_growth_medium(cobra_model, the_medium='MgM',
         _system_boundaries = dict([(x, x.get_compartments())
                                    for x in cobra_model.reactions
                                    if x.boundary == 'system_boundary'])
-        [_system_boundaries.pop(k) for k, v in _system_boundaries.items()
+        [_system_boundaries.pop(k) for k, v in list(_system_boundaries.items())
          if len(v) == 1 and external_boundary_compartment not in v]
         if external_boundary_reactions is None:
             external_boundary_reactions = _system_boundaries.keys()
@@ -116,17 +117,18 @@ def convert_to_irreversible(cobra_model):
             #Make the directions aware of each other
             reaction.reflection = reverse_reaction
             reverse_reaction.reflection = reaction
-            reaction.reversibility = reverse_reaction.reversibility = 0
             reaction_dict = dict([(k, v*-1)
                                   for k, v in reaction._metabolites.items()])
             reverse_reaction.add_metabolites(reaction_dict)
             reverse_reaction._model = reaction._model
             reverse_reaction._genes = reaction._genes
-            reverse_reaction.gene_reaction_rule = reaction.gene_reaction_rule
+            for gene in reaction._genes:
+                gene._reaction.add(reverse_reaction)
+            reverse_reaction._gene_reaction_rule = reaction._gene_reaction_rule
             reactions_to_add.append(reverse_reaction)
     cobra_model.add_reactions(reactions_to_add)
  
-def revert_to_reversible(cobra_model):
+def revert_to_reversible(cobra_model, update_solution=True):
     """This function will convert a reversible model made by convert_to_irreversible
     into a reversible model.
 
@@ -135,18 +137,25 @@ def revert_to_reversible(cobra_model):
     NOTE: It might just be easiest to include this function in the Reaction class
     
     """
-    reversible_reactions = [x for x in cobra_model.reactions
-                            if x.reflection is not None and
-                            not x.id.endswith('_reverse')]
+    reverse_reactions = [x for x in cobra_model.reactions
+                         if x.reflection is not None and
+                         x.id.endswith('_reverse')]
 
-    for the_reaction in reversible_reactions:
-        the_reflection = the_reaction.reflection
-        the_reaction.lower_bound = -the_reflection.lower_bound
-        the_reaction.reflection = None
-        #Since the metabolites and genes are all still in
-        #use we can do this faster removal step.  We can
-        #probably speed things up here.
-        cobra_model.reactions.remove(the_reaction)
+    for reverse in reverse_reactions:
+        forward = reverse.reflection
+        forward.lower_bound = -reverse.upper_bound
+        forward.reflection = None
+    #Since the metabolites and genes are all still in
+    #use we can do this faster removal step.  We can
+    #probably speed things up here.
+    cobra_model.remove_reactions(reverse_reactions)
+    # fix the solution
+    if update_solution and cobra_model.solution is not None:
+        x_dict = cobra_model.solution.x_dict
+        for reverse in reverse_reactions:
+            forward = reverse.reflection
+            x_dict[forward.id] -= x_dict.pop(reverse.id)
+        cobra_model.solution.x = [x_dict[r.id] for r in cobra_model.reactions]
 
    
 def convert_rule_to_boolean_rule(cobra_model, the_rule,

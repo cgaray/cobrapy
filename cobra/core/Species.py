@@ -2,6 +2,7 @@
 #######################
 #BEGIN Class Species
 #
+from warnings import warn
 from copy import deepcopy
 from .Formula import Formula
 from .Object import Object
@@ -32,7 +33,7 @@ class Species(Object):
         of the metabolite.  Used when in a cobra.Reaction or Model
         object
         
-	mnx_id: None or a String of the MetaNetX.org ID for the object.
+        mnx_id: None or a String of the MetaNetX.org ID for the object.
 
         """
         Object.__init__(self, id, mnx_id=mnx_id)
@@ -51,7 +52,10 @@ class Species(Object):
         self._model =  self.charge = None
         self._reaction = set() #references to reactions that operate on this species
 
-  
+    @property
+    def reactions(self):
+        return frozenset(self._reaction)
+
     def parse_composition(self):
         """Breaks the chemical formula down by element.
         Useful for making sure Reactions are balanced.'
@@ -84,6 +88,7 @@ class Species(Object):
         numbers of metabolites might be copied.  Such as when copying reactions.
 
         """
+        warn("deprecated")
         the_copy = Object.guided_copy(self)
         #Copy the more complex objects in a faster fashion
         the_copy.formula = deepcopy(self.formula)
@@ -95,13 +100,18 @@ class Species(Object):
         """Returns a list of Reactions that contain this Species
 
         """
+        warn("deprecated, used species.reactions instead")
         return list(self._reaction)
     
     def get_model(self):
         """Returns the Model object that contain this Object
 
         """
+        print("get_model is deprecated. used model property instead")
         return self._model
+    @property
+    def model(self):
+        return(self._model)
 #
 #END Class Species
 ########################

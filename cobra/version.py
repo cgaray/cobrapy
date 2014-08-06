@@ -1,6 +1,7 @@
 #!/usr/bin/env python
+from __future__ import print_function
 
-__all__ = ("get_version")
+__all__ = ("get_version",)
 
 from subprocess import check_output
 from os import path, name, devnull
@@ -53,15 +54,31 @@ def call_git_describe(abbrev=7):
             arguments = [git_command, "describe", "--tags",
                          "--abbrev=%d" % abbrev]
             return check_output(arguments, cwd=current_directory,
-                                stderr=fnull).strip()
+                                stderr=fnull).decode("ascii").strip()
     except:
         return None
+
+def get_version_git(pep440=False):
+    git_str = call_git_describe()
+    if git_str is None:
+        return None
+    git_split = git_str.split("-")
+    if "-" not in git_str:  # currently at a tag
+        return git_str
+    else:
+        # formatted as version-N-githash
+        # want to convert to version.postN-githash
+        git_str = git_str.replace("-", ".post", 1)
+        if pep440:  # does not allow git hash afterwards
+            return git_str.split("-")[0]
+        else:
+            return git_str
 
 
 def read_release_version():
     try:
         with open(version_file, "r") as infile:
-            version = infile.read().strip()
+            version = str(infile.read().strip())
         if len(version) == 0:
             version = None
         return version
@@ -69,7 +86,7 @@ def read_release_version():
         return None
 
 
-def get_version():
+def get_version(pep440=False):
     """Tracks the version number.
 
     The file VERSION holds the version information. If this is not a git
@@ -80,18 +97,15 @@ def get_version():
     However, if the script is located within an active git repository,
     git-describe is used to get the version information.
 
-    The file VERSION will need to be changed by manually. This only
-    needs to occur twice per release:
-      - Once right before running git tag (set to the same as the version in
-        the tag).
-      - Once right after running git tag (set to next_version.dev)
+    The file VERSION will need to be changed by manually. This should be done
+    before running git tag (set to the same as the version in the tag).
     """
 
-    git_version = call_git_describe()
+    git_version = get_version_git(pep440=pep440)
     if git_version is None:  # not a git repository
         return read_release_version()
     return git_version
 
 
 if __name__ == "__main__":
-    print get_version()
+    print(get_version())

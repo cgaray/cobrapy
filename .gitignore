@@ -4,6 +4,13 @@ gurobi.log
 documentation
 cobra.egg-info
 build/
+dist/
 .DS_Store
 setuptools-*egg
 setuptools-*.tar.gz
+cobra/solvers/cglpk.c
+cobra/solvers/cglpk*so
+glpk.h
+libglpk.a
+.idea/
+.ipynb_checkpoints

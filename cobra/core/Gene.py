@@ -1,9 +1,7 @@
-#cobra.Gene.py
-#######################
-#BEGIN Class Gene
-#
 import re
+
 from .Species import Species
+
 class Gene(Species):
     """A Gene is a special class of metabolite.
     
@@ -43,28 +41,22 @@ class Gene(Species):
         self.strand = strand
         self.functional = functional
 
-    def guided_copy(self, the_model):
-        """Trying to make a faster copy proceedure for cases where large
-        numbers of genes might be copied.  Such as when copying reactions.
-
-        """
-        the_copy = Species.guided_copy(self, the_model)
-        return(the_copy)
-
-    def remove_from_model(self, the_model,
+    def remove_from_model(self, model,
                           make_dependent_reactions_nonfunctional=True):
         """Removes the association
 
-        the_model: :class:`~cobra.core.Model` object.
+        model: :class:`~cobra.core.Model` object.
             Remove the reaction from this model.
 
         make_dependent_reactions_nonfunctional: Boolean.  If True then replace
         the gene with 'False' in the gene association, else replace the gene
         with 'True'
 
-        TODO:  Better handling of the gene association
-        
+        .. note :: Simulating gene knockouts is much better handled by 
+                   cobra.manipulation.delete_model_genes
+
         """
+        the_model = model
         if make_dependent_reactions_nonfunctional:
             gene_state = 'False'
         else:
@@ -81,7 +73,7 @@ class Gene(Species):
         for the_reaction in self._reaction:
             the_reaction.gene_reaction_rule = the_gene_re.sub(gene_state,
                                                               the_reaction.gene_reaction_rule)
-            the_reaction._genes.pop(self)
+            the_reaction._genes.remove(self)
             #Now deactivate the reaction if its gene association evaluates to False
             the_gene_reaction_relation = the_reaction.gene_reaction_rule
             for other_gene in the_reaction._genes:
@@ -91,7 +83,3 @@ class Gene(Species):
             if not eval(the_gene_reaction_relation):
                 the_reaction.lower_bound = 0
                 the_reaction.upper_bound = 0
-                                       
-#
-#END Class Gene
-########################
